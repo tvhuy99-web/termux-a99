@@ -38,9 +38,9 @@ import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 
 import com.termux.terminal.KeyHandler;
+import com.termux.terminal.TerminalBuffer;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
-import com.termux.terminal.TextStyle;
 import com.termux.view.textselection.TextSelectionCursorController;
 
 /** View displaying and interacting with a {@link TerminalSession}. */
@@ -127,18 +127,13 @@ public final class TerminalView extends View {
     private final boolean mAccessibilityEnabled;
 
     /**
-     * TalkBack navigation support for terminal UIs. Terminal applications are rendered as a custom
-     * canvas, so Android accessibility cannot see their internal buttons, menus or highlighted rows.
-     * We snapshot the terminal before a navigation key is sent, then announce the part that became
-     * selected (preferably reverse-video text) or the line at the new cursor position.
+     * Terminal applications draw their own controls, so TalkBack sees the terminal as one custom view.
+     * Navigation keys arm a short accessibility probe. Once the terminal updates, the text under the
+     * terminal cursor is announced. If no update arrives, the key name is announced as confirmation.
      */
     private boolean mAccessibilityNavigationPending;
     private int mAccessibilityNavigationKeyCode = KeyEvent.KEYCODE_UNKNOWN;
-    private int mAccessibilityPreviousCursorRow = -1;
-    private int mAccessibilityPreviousCursorCol = -1;
-    private String[] mAccessibilityPreviousLines;
-    private long[][] mAccessibilityPreviousStyles;
-    private long mAccessibilityNavigationGeneration;
+    private Runnable mAccessibilityNavigationFallbackRunnable;
 
     /** The {@link KeyEvent} is generated from a virtual keyboard, like manually with the {@link KeyEvent#KeyEvent(int, int)} constructor. */
     public final static int KEY_EVENT_SOURCE_VIRTUAL_KEYBOARD = KeyCharacterMap.VIRTUAL_KEYBOARD; // -1
@@ -478,10 +473,10 @@ public final class TerminalView extends View {
             case KeyEvent.KEYCODE_DPAD_LEFT:
             case KeyEvent.KEYCODE_DPAD_RIGHT:
             case KeyEvent.KEYCODE_TAB:
-            case KeyEvent.KEYCODE_MOVE_HOME:
-            case KeyEvent.KEYCODE_MOVE_END:
             case KeyEvent.KEYCODE_PAGE_UP:
             case KeyEvent.KEYCODE_PAGE_DOWN:
+            case KeyEvent.KEYCODE_MOVE_HOME:
+            case KeyEvent.KEYCODE_MOVE_END:
                 return true;
             default:
                 return false;
@@ -493,232 +488,18 @@ public final class TerminalView extends View {
 
         mAccessibilityNavigationPending = true;
         mAccessibilityNavigationKeyCode = keyCode;
-        mAccessibilityPreviousCursorRow = mEmulator.getCursorRow();
-        mAccessibilityPreviousCursorCol = mEmulator.getCursorCol();
 
-        int rows = mEmulator.mRows;
-        int columns = mEmulator.mColumns;
-        mAccessibilityPreviousLines = new String[rows];
-        mAccessibilityPreviousStyles = new long[rows][columns];
-
-        for (int row = 0; row < rows; row++) {
-            mAccessibilityPreviousLines[row] = getAccessibilityRowText(row);
-            for (int column = 0; column < columns; column++) {
-                mAccessibilityPreviousStyles[row][column] = mEmulator.getScreen().getStyleAt(row, column);
-            }
+        if (mAccessibilityNavigationFallbackRunnable == null) {
+            mAccessibilityNavigationFallbackRunnable = () -> {
+                if (!mAccessibilityNavigationPending) return;
+                mAccessibilityNavigationPending = false;
+                String keyName = getAccessibilityNavigationKeyName(mAccessibilityNavigationKeyCode);
+                if (!TextUtils.isEmpty(keyName)) announceForAccessibility(keyName);
+            };
         }
 
-        final long generation = ++mAccessibilityNavigationGeneration;
-        postDelayed(() -> {
-            if (mAccessibilityNavigationPending && generation == mAccessibilityNavigationGeneration) {
-                String fallback = getAccessibilityNavigationKeyName(mAccessibilityNavigationKeyCode);
-                clearAccessibilityNavigationState();
-                if (!TextUtils.isEmpty(fallback)) announceForAccessibility(fallback);
-            }
-        }, 350);
-    }
-
-    private void announceAccessibilityNavigationResult() {
-        if (!mAccessibilityNavigationPending || mEmulator == null) return;
-
-        String announcement = findNewlyHighlightedAccessibilityText();
-        if (TextUtils.isEmpty(announcement)) {
-            announcement = findDistinctChangedStyleAccessibilityText();
-        }
-        if (TextUtils.isEmpty(announcement)) {
-            int cursorRow = mEmulator.getCursorRow();
-            int cursorCol = mEmulator.getCursorCol();
-
-            if (cursorRow != mAccessibilityPreviousCursorRow || cursorCol != mAccessibilityPreviousCursorCol) {
-                announcement = getAccessibilityTextAtCursor();
-            }
-
-            if (TextUtils.isEmpty(announcement)) {
-                announcement = findChangedAccessibilityLine();
-            }
-        }
-
-        if (TextUtils.isEmpty(announcement)) return;
-
-        clearAccessibilityNavigationState();
-        announceForAccessibility(announcement);
-    }
-
-    private void clearAccessibilityNavigationState() {
-        mAccessibilityNavigationPending = false;
-        mAccessibilityNavigationKeyCode = KeyEvent.KEYCODE_UNKNOWN;
-        mAccessibilityPreviousCursorRow = -1;
-        mAccessibilityPreviousCursorCol = -1;
-        mAccessibilityPreviousLines = null;
-        mAccessibilityPreviousStyles = null;
-    }
-
-    private String findNewlyHighlightedAccessibilityText() {
-        if (mAccessibilityPreviousStyles == null || mEmulator == null) return null;
-
-        int rows = Math.min(mEmulator.mRows, mAccessibilityPreviousStyles.length);
-        int columns = mEmulator.mColumns;
-        String best = null;
-        int bestScore = Integer.MIN_VALUE;
-        int cursorRow = mEmulator.getCursorRow();
-        int cursorCol = mEmulator.getCursorCol();
-
-        for (int row = 0; row < rows; row++) {
-            int rowColumns = Math.min(columns, mAccessibilityPreviousStyles[row].length);
-            int start = -1;
-
-            for (int column = 0; column <= rowColumns; column++) {
-                boolean newlyInverse = false;
-                if (column < rowColumns) {
-                    long oldStyle = mAccessibilityPreviousStyles[row][column];
-                    long newStyle = mEmulator.getScreen().getStyleAt(row, column);
-                    boolean oldInverse = (TextStyle.decodeEffect(oldStyle) & TextStyle.CHARACTER_ATTRIBUTE_INVERSE) != 0;
-                    boolean newInverse = (TextStyle.decodeEffect(newStyle) & TextStyle.CHARACTER_ATTRIBUTE_INVERSE) != 0;
-                    newlyInverse = newInverse && !oldInverse;
-                }
-
-                if (newlyInverse) {
-                    if (start < 0) start = column;
-                } else if (start >= 0) {
-                    int end = column - 1;
-                    String text = getAccessibilitySpanText(row, start, end);
-                    if (!TextUtils.isEmpty(text)) {
-                        int score = 1000;
-                        if (row == cursorRow) score += 100;
-                        if (cursorCol >= start && cursorCol <= end) score += 50;
-                        score -= Math.abs(row - cursorRow);
-                        if (score > bestScore) {
-                            bestScore = score;
-                            best = text;
-                        }
-                    }
-                    start = -1;
-                }
-            }
-        }
-
-        return best;
-    }
-
-    /**
-     * Some TUIs indicate the active item by changing foreground/background colours rather than
-     * using the ANSI inverse attribute. Prefer changed style runs that are visually distinct from
-     * their neighbours; a deselected item normally collapses back into the surrounding style,
-     * while a newly selected item normally remains distinct.
-     */
-    private String findDistinctChangedStyleAccessibilityText() {
-        if (mAccessibilityPreviousStyles == null || mEmulator == null) return null;
-
-        int rows = Math.min(mEmulator.mRows, mAccessibilityPreviousStyles.length);
-        int columns = mEmulator.mColumns;
-        int cursorRow = mEmulator.getCursorRow();
-        int cursorCol = mEmulator.getCursorCol();
-        String best = null;
-        int bestScore = Integer.MIN_VALUE;
-
-        for (int row = 0; row < rows; row++) {
-            int rowColumns = Math.min(columns, mAccessibilityPreviousStyles[row].length);
-            int column = 0;
-
-            while (column < rowColumns) {
-                long currentStyle = mEmulator.getScreen().getStyleAt(row, column);
-                boolean changed = currentStyle != mAccessibilityPreviousStyles[row][column];
-                if (!changed) {
-                    column++;
-                    continue;
-                }
-
-                int start = column;
-                int end = column;
-                while (end + 1 < rowColumns
-                    && mEmulator.getScreen().getStyleAt(row, end + 1) == currentStyle
-                    && mEmulator.getScreen().getStyleAt(row, end + 1) != mAccessibilityPreviousStyles[row][end + 1]) {
-                    end++;
-                }
-
-                String text = getAccessibilitySpanText(row, start, end);
-                if (!TextUtils.isEmpty(text)) {
-                    boolean distinctLeft = start == 0
-                        || mEmulator.getScreen().getStyleAt(row, start - 1) != currentStyle;
-                    boolean distinctRight = end == rowColumns - 1
-                        || mEmulator.getScreen().getStyleAt(row, end + 1) != currentStyle;
-
-                    int score = 0;
-                    if (distinctLeft) score += 80;
-                    if (distinctRight) score += 80;
-                    if (row == cursorRow) score += 40;
-                    if (cursorCol >= start && cursorCol <= end) score += 30;
-                    score -= Math.abs(row - cursorRow);
-
-                    // Require the new run to remain visually distinct on at least one side.
-                    if ((distinctLeft || distinctRight) && score > bestScore) {
-                        bestScore = score;
-                        best = text;
-                    }
-                }
-
-                column = end + 1;
-            }
-        }
-
-        return best;
-    }
-
-    private String findChangedAccessibilityLine() {
-        if (mAccessibilityPreviousLines == null || mEmulator == null) return null;
-
-        int rows = Math.min(mEmulator.mRows, mAccessibilityPreviousLines.length);
-        int cursorRow = mEmulator.getCursorRow();
-        String best = null;
-        int bestDistance = Integer.MAX_VALUE;
-
-        for (int row = 0; row < rows; row++) {
-            String current = getAccessibilityRowText(row);
-            String previous = mAccessibilityPreviousLines[row];
-            if (!TextUtils.equals(current, previous) && !TextUtils.isEmpty(current)) {
-                int distance = Math.abs(row - cursorRow);
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    best = current;
-                }
-            }
-        }
-
-        return best;
-    }
-
-    private String getAccessibilityTextAtCursor() {
-        if (mEmulator == null) return null;
-
-        int row = mEmulator.getCursorRow();
-        int column = mEmulator.getCursorCol();
-
-        String word = cleanAccessibilityAnnouncement(
-            mEmulator.getScreen().getWordAtLocation(column, row));
-        if (!TextUtils.isEmpty(word)) return word;
-
-        return getAccessibilityRowText(row);
-    }
-
-    private String getAccessibilityRowText(int row) {
-        if (mEmulator == null || row < 0 || row >= mEmulator.mRows) return null;
-        return cleanAccessibilityAnnouncement(
-            mEmulator.getScreen().getSelectedText(0, row, mEmulator.mColumns, row, false));
-    }
-
-    private String getAccessibilitySpanText(int row, int startColumn, int endColumn) {
-        if (mEmulator == null || startColumn < 0 || endColumn < startColumn) return null;
-        return cleanAccessibilityAnnouncement(
-            mEmulator.getScreen().getSelectedText(startColumn, row, endColumn, row, false));
-    }
-
-    private String cleanAccessibilityAnnouncement(String text) {
-        if (text == null) return null;
-        String cleaned = text.replaceAll("[\\t\\r\\n]+", " ")
-            .replaceAll(" {2,}", " ").trim();
-        if (cleaned.isEmpty()) return null;
-        if (cleaned.length() > 240) cleaned = cleaned.substring(0, 240).trim();
-        return cleaned;
+        removeCallbacks(mAccessibilityNavigationFallbackRunnable);
+        postDelayed(mAccessibilityNavigationFallbackRunnable, 350);
     }
 
     private String getAccessibilityNavigationKeyName(int keyCode) {
@@ -728,12 +509,55 @@ public final class TerminalView extends View {
             case KeyEvent.KEYCODE_DPAD_LEFT: return "Left arrow";
             case KeyEvent.KEYCODE_DPAD_RIGHT: return "Right arrow";
             case KeyEvent.KEYCODE_TAB: return "Tab";
-            case KeyEvent.KEYCODE_MOVE_HOME: return "Home";
-            case KeyEvent.KEYCODE_MOVE_END: return "End";
             case KeyEvent.KEYCODE_PAGE_UP: return "Page up";
             case KeyEvent.KEYCODE_PAGE_DOWN: return "Page down";
+            case KeyEvent.KEYCODE_MOVE_HOME: return "Home";
+            case KeyEvent.KEYCODE_MOVE_END: return "End";
             default: return null;
         }
+    }
+
+    private String getAccessibilityTextAtCursor() {
+        if (mEmulator == null) return null;
+
+        int row = mEmulator.getCursorRow();
+        int column = mEmulator.getCursorCol();
+        TerminalBuffer screen = mEmulator.getScreen();
+
+        if (column >= 0 && column < mEmulator.mColumns) {
+            long cursorStyle = screen.getStyleAt(row, column);
+            int left = column;
+            int right = column;
+
+            while (left > 0 && screen.getStyleAt(row, left - 1) == cursorStyle) left--;
+            while (right + 1 < mEmulator.mColumns && screen.getStyleAt(row, right + 1) == cursorStyle) right++;
+
+            String styledText = screen.getSelectedText(left, row, right, row, false).trim();
+            if (!TextUtils.isEmpty(styledText) && styledText.length() <= 120) return styledText;
+        }
+
+        String word = screen.getWordAtLocation(column, row);
+        if (!TextUtils.isEmpty(word)) {
+            word = word.trim();
+            if (!TextUtils.isEmpty(word)) return word;
+        }
+
+        String line = screen.getSelectedText(0, row, mEmulator.mColumns, row, false).trim();
+        if (TextUtils.isEmpty(line)) return null;
+        return line.length() > 240 ? line.substring(0, 240).trim() : line;
+    }
+
+    private void announceAccessibilityNavigationResult() {
+        if (!mAccessibilityNavigationPending || !mAccessibilityEnabled) return;
+
+        String text = getAccessibilityTextAtCursor();
+        if (TextUtils.isEmpty(text)) return;
+
+        if (mAccessibilityNavigationFallbackRunnable != null)
+            removeCallbacks(mAccessibilityNavigationFallbackRunnable);
+
+        mAccessibilityNavigationPending = false;
+        announceForAccessibility(text);
     }
 
     public void onScreenUpdated(boolean skipScrolling) {
