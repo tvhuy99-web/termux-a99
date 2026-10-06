@@ -487,7 +487,7 @@ public final class TerminalView extends View {
     }
 
     private void prepareAccessibilityNavigationAnnouncement(int keyCode) {
-        if (!mAccessibilityEnabled || mEmulator == null || !isAccessibilityNavigationKey(keyCode)) return;
+        if (mEmulator == null || !isAccessibilityNavigationKey(keyCode)) return;
 
         mAccessibilityNavigationPending = true;
         mAccessibilityNavigationKeyCode = keyCode;
@@ -498,7 +498,7 @@ public final class TerminalView extends View {
                 mAccessibilityNavigationPending = false;
                 String keyName = getAccessibilityNavigationKeyName(mAccessibilityNavigationKeyCode);
                 updateAccessibilityDebugText("Không phát hiện văn bản mới. Phím đã gửi: " + (TextUtils.isEmpty(keyName) ? mAccessibilityNavigationKeyCode : keyName));
-                if (!TextUtils.isEmpty(keyName)) announceForAccessibility(keyName);
+                if (mAccessibilityEnabled && !TextUtils.isEmpty(keyName)) announceForAccessibility(keyName);
             };
         }
 
@@ -541,6 +541,12 @@ public final class TerminalView extends View {
         TextView debugView = getOrCreateAccessibilityDebugView();
         if (debugView == null) return;
         debugView.setText("A11y debug: " + text);
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        updateAccessibilityDebugText("Sẵn sàng. Hãy thử phím mũi tên hoặc Tab.");
     }
 
     private String getAccessibilityNavigationKeyName(int keyCode) {
@@ -589,7 +595,7 @@ public final class TerminalView extends View {
     }
 
     private void announceAccessibilityNavigationResult() {
-        if (!mAccessibilityNavigationPending || !mAccessibilityEnabled) return;
+        if (!mAccessibilityNavigationPending) return;
 
         String text = getAccessibilityTextAtCursor();
         if (TextUtils.isEmpty(text)) return;
@@ -599,7 +605,7 @@ public final class TerminalView extends View {
 
         mAccessibilityNavigationPending = false;
         updateAccessibilityDebugText("Phát hiện: " + text);
-        announceForAccessibility(text);
+        if (mAccessibilityEnabled) announceForAccessibility(text);
     }
 
     public void onScreenUpdated(boolean skipScrolling) {
@@ -642,10 +648,8 @@ public final class TerminalView extends View {
         mEmulator.clearScrollCounter();
 
         invalidate();
-        if (mAccessibilityEnabled) {
-            setContentDescription(getText());
-            announceAccessibilityNavigationResult();
-        }
+        if (mAccessibilityEnabled) setContentDescription(getText());
+        announceAccessibilityNavigationResult();
     }
 
     /** This must be called by the hosting activity in {@link Activity#onContextMenuClosed(Menu)}
