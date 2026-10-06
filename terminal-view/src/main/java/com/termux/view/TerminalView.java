@@ -32,7 +32,9 @@ import android.view.autofill.AutofillValue;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import android.widget.FrameLayout;
 import android.widget.Scroller;
+import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
@@ -134,6 +136,7 @@ public final class TerminalView extends View {
     private boolean mAccessibilityNavigationPending;
     private int mAccessibilityNavigationKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private Runnable mAccessibilityNavigationFallbackRunnable;
+    private static final String ACCESSIBILITY_DEBUG_VIEW_TAG = "termux_a11y_debug_status";
 
     /** The {@link KeyEvent} is generated from a virtual keyboard, like manually with the {@link KeyEvent#KeyEvent(int, int)} constructor. */
     public final static int KEY_EVENT_SOURCE_VIRTUAL_KEYBOARD = KeyCharacterMap.VIRTUAL_KEYBOARD; // -1
@@ -494,12 +497,50 @@ public final class TerminalView extends View {
                 if (!mAccessibilityNavigationPending) return;
                 mAccessibilityNavigationPending = false;
                 String keyName = getAccessibilityNavigationKeyName(mAccessibilityNavigationKeyCode);
+                updateAccessibilityDebugText("Không phát hiện văn bản mới. Phím đã gửi: " + (TextUtils.isEmpty(keyName) ? mAccessibilityNavigationKeyCode : keyName));
                 if (!TextUtils.isEmpty(keyName)) announceForAccessibility(keyName);
             };
         }
 
         removeCallbacks(mAccessibilityNavigationFallbackRunnable);
         postDelayed(mAccessibilityNavigationFallbackRunnable, 350);
+
+        String keyName = getAccessibilityNavigationKeyName(keyCode);
+        updateAccessibilityDebugText("Đã nhận phím: " + (TextUtils.isEmpty(keyName) ? keyCode : keyName) + ". Đang chờ terminal cập nhật…");
+    }
+
+    private TextView getOrCreateAccessibilityDebugView() {
+        View root = getRootView();
+        if (root != null) {
+            View existing = root.findViewWithTag(ACCESSIBILITY_DEBUG_VIEW_TAG);
+            if (existing instanceof TextView) return (TextView) existing;
+        }
+
+        Context context = getContext();
+        if (!(context instanceof Activity)) return null;
+
+        TextView debugView = new TextView(context);
+        debugView.setTag(ACCESSIBILITY_DEBUG_VIEW_TAG);
+        debugView.setTextColor(0xFFFFFFFF);
+        debugView.setBackgroundColor(0xDD000000);
+        debugView.setTextSize(16);
+        debugView.setPadding(24, 16, 24, 16);
+        debugView.setMaxLines(4);
+        debugView.setFocusable(true);
+        debugView.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        params.gravity = android.view.Gravity.TOP;
+
+        ((Activity) context).addContentView(debugView, params);
+        return debugView;
+    }
+
+    private void updateAccessibilityDebugText(String text) {
+        TextView debugView = getOrCreateAccessibilityDebugView();
+        if (debugView == null) return;
+        debugView.setText("A11y debug: " + text);
     }
 
     private String getAccessibilityNavigationKeyName(int keyCode) {
@@ -557,6 +598,7 @@ public final class TerminalView extends View {
             removeCallbacks(mAccessibilityNavigationFallbackRunnable);
 
         mAccessibilityNavigationPending = false;
+        updateAccessibilityDebugText("Phát hiện: " + text);
         announceForAccessibility(text);
     }
 
