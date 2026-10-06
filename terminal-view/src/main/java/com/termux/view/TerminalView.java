@@ -523,6 +523,9 @@ public final class TerminalView extends View {
 
         String announcement = findNewlyHighlightedAccessibilityText();
         if (TextUtils.isEmpty(announcement)) {
+            announcement = findDistinctChangedStyleAccessibilityText();
+        }
+        if (TextUtils.isEmpty(announcement)) {
             int cursorRow = mEmulator.getCursorRow();
             int cursorCol = mEmulator.getCursorCol();
 
@@ -591,6 +594,70 @@ public final class TerminalView extends View {
                     }
                     start = -1;
                 }
+            }
+        }
+
+        return best;
+    }
+
+    /**
+     * Some TUIs indicate the active item by changing foreground/background colours rather than
+     * using the ANSI inverse attribute. Prefer changed style runs that are visually distinct from
+     * their neighbours; a deselected item normally collapses back into the surrounding style,
+     * while a newly selected item normally remains distinct.
+     */
+    private String findDistinctChangedStyleAccessibilityText() {
+        if (mAccessibilityPreviousStyles == null || mEmulator == null) return null;
+
+        int rows = Math.min(mEmulator.mRows, mAccessibilityPreviousStyles.length);
+        int columns = mEmulator.mColumns;
+        int cursorRow = mEmulator.getCursorRow();
+        int cursorCol = mEmulator.getCursorCol();
+        String best = null;
+        int bestScore = Integer.MIN_VALUE;
+
+        for (int row = 0; row < rows; row++) {
+            int rowColumns = Math.min(columns, mAccessibilityPreviousStyles[row].length);
+            int column = 0;
+
+            while (column < rowColumns) {
+                long currentStyle = mEmulator.getScreen().getStyleAt(row, column);
+                boolean changed = currentStyle != mAccessibilityPreviousStyles[row][column];
+                if (!changed) {
+                    column++;
+                    continue;
+                }
+
+                int start = column;
+                int end = column;
+                while (end + 1 < rowColumns
+                    && mEmulator.getScreen().getStyleAt(row, end + 1) == currentStyle
+                    && mEmulator.getScreen().getStyleAt(row, end + 1) != mAccessibilityPreviousStyles[row][end + 1]) {
+                    end++;
+                }
+
+                String text = getAccessibilitySpanText(row, start, end);
+                if (!TextUtils.isEmpty(text)) {
+                    boolean distinctLeft = start == 0
+                        || mEmulator.getScreen().getStyleAt(row, start - 1) != currentStyle;
+                    boolean distinctRight = end == rowColumns - 1
+                        || mEmulator.getScreen().getStyleAt(row, end + 1) != currentStyle;
+
+                    int score = 0;
+                    if (distinctLeft) score += 80;
+                    if (distinctRight) score += 80;
+                    if (row == cursorRow) score += 40;
+                    if (cursorCol >= start && cursorCol <= end) score += 30;
+                    score -= Math.abs(row - cursorRow);
+
+                    // Require the new run to remain visually distinct on at least one side.
+                    if ((distinctLeft || distinctRight) && score > bestScore) {
+                        bestScore = score;
+                        best = text;
+                    }
+                }
+
+                column = end + 1;
             }
         }
 
