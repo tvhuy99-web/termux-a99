@@ -1,4 +1,13 @@
 jdk:
   - openjdk17
+
 env:
   JITPACK_NDK_VERSION: "29.0.14206865"
+  TERMUX_PACKAGE_VARIANT: "apt-android-7"
+  TERMUX_APK_VERSION_TAG: "accessibility-talkback-jitpack"
+
+install:
+  - ./gradlew assembleDebug
+  - mkdir -p "$HOME/.m2/repository/com/github/tvhuy99-web/termux-a99/$VERSION"
+  - APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*_universal.apk' -type f | head -n 1)" && test -n "$APK" && cp "$APK" "$HOME/.m2/repository/com/github/tvhuy99-web/termux-a99/$VERSION/termux-a99-$VERSION.jar"
+  - printf '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>com.github.tvhuy99-web</groupId><artifactId>termux-a99</artifactId><version>%s</version></project>\n' "$VERSION" > "$HOME/.m2/repository/com/github/tvhuy99-web/termux-a99/$VERSION/termux-a99-$VERSION.pom"
